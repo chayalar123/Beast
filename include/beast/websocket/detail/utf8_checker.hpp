@@ -63,6 +63,7 @@ namespace detail {
     3. This notice may not be removed or altered from any source distribution.
 */
 
+#if 0
 /** A UTF8 validator.
 
     This validator can be used to check if a buffer containing UTF8 text is
@@ -328,6 +329,179 @@ tail:
     }
     return true;
 }
+
+#else
+
+template<class = void>
+class utf8_checker_t
+{
+    std::uint8_t pending_ = 0;
+
+    template<typename FwdIt>
+    bool is_valid_utf8(
+        FwdIt i, FwdIt end, uint8_t& pending);
+
+public:
+    /** Prepare to process text as valid utf8
+    */
+    void
+    reset();
+
+    /** Check that all processed text is valid utf8
+    */
+    bool
+    finish();
+
+    /** Check if text is valid UTF8
+
+        @return `true` if the text is valid utf8 or false otherwise.
+    */
+    bool
+    write(std::uint8_t const* in, std::size_t size);
+
+    /** Check if text is valid UTF8
+
+        @return `true` if the text is valid utf8 or false otherwise.
+    */
+    template<class ConstBufferSequence>
+    bool
+    write(ConstBufferSequence const& bs);
+};
+
+template<class _>
+void
+utf8_checker_t<_>::
+reset()
+{
+    pending_ = 0;
+}
+
+template<class _>
+bool
+utf8_checker_t<_>::
+finish()
+{
+    auto const valid = pending_ == 0;
+    pending_ = 0;
+    return valid;
+}
+
+template<class _>
+template<class ConstBufferSequence>
+bool
+utf8_checker_t<_>::
+write(ConstBufferSequence const& bs)
+{
+    static_assert(is_const_buffer_sequence<ConstBufferSequence>::value,
+        "ConstBufferSequence requirements not met");
+    using boost::asio::buffer_cast;
+    using boost::asio::buffer_size;
+    for(boost::asio::const_buffer b : bs)
+        if(! write(buffer_cast<std::uint8_t const*>(b),
+                buffer_size(b)))
+            return false;
+    return true;
+}
+
+template<class _>
+bool
+utf8_checker_t<_>::
+write(std::uint8_t const* in, std::size_t size)
+{
+    return is_valid_utf8(in, in + size, pending_);
+}
+
+// Contributed by Phil Endecott
+// Copyright 2017
+//
+template<class _>
+template <typename FwdIt>
+bool
+utf8_checker_t<_>::
+is_valid_utf8(FwdIt i, FwdIt end, uint8_t& pending)
+{
+  using CharT = typename std::iterator_traits<FwdIt>::value_type;
+
+  // Check if range is valid and complete UTF-8.
+  // pending is used to carry state about an incomplete multi-byte character
+  // from one call to the next.  It should be zero initially and is zero on return if
+  // the input is not mid-character.  After submitting the last chunk the caller
+  // should check both the return value and pending==0.
+
+  // Skip bytes pending from last buffer.
+  // The number of 1s at the most significant end of the first byte of a multi-byte
+  // character indicates the total number of bytes in the character.  pending is
+  // this byte, shifted to allow for the number of bytes already seen.
+  while (pending & 0x80) {
+    uint8_t b = *i++;
+    pending = pending<<1;
+    if ((b & 0xc0) != 0x80) return false;   // Must be a 10xxxxxx continuation byte.
+    if (i == end) return true;
+  }
+
+  pending = 0;
+
+  while (i != end) {
+
+    // If i is suitably aligned, do a fast word-at-a-time check for ASCII characters.
+    // FIXME this only works if FwdIt is a contiguous iterator; it needs a "static if".
+    const CharT* p = &(*i);
+    const CharT* e = p + (end-i);   // I don't think &(*end) is allowed because it appears to dereference end.
+    unsigned long int w;            // Should be 32 bits on 32-bit processor and 64 bits on 64-bit processor.
+    if (reinterpret_cast<std::uintptr_t>(p) % sizeof(w) == 0) {
+      while (p+sizeof(w) <= e) {
+        std::memcpy(&w,p,sizeof(w));
+        if (w & 0x8080808080808080) break;  // If any of the top bits are set, fall back to the
+                                            // byte-at-a-time code below.
+                                            // (Is there a better way to write the mask value that would work
+                                            // for e.g. 128-bit ints?  Is that expression OK for 32-bit ints?)
+        p += sizeof(w);
+        i += sizeof(w);
+      }
+      if (p == e) break;
+    }
+
+    std::uint8_t b0 = *i++;
+    if ((b0 & 0x80) == 0) continue;         // Single byte chars are 0xxxxxxx
+
+    if ((b0 & 0xc0) == 0x80) return false;  // 10xxxxxx not allowed as first byte of character
+    if ((b0 & 0xf8) == 0xf8) return false;  // 11111xxx is not valid
+                                            // At this point, we know b0 is a valid first-byte
+
+    if (i == end) {                         // Incomplete input
+      pending = b0 << 1;                    // 1 byte seen so far, rest are pending.
+      return true;
+    }
+
+    std::uint8_t b1 = *i++;
+    if ((b1 & 0xc0) != 0x80) return false;  // Following bytes are all 10xxxxxx
+    if ((b0 & 0xe0) == 0xc0) continue;      // Two-byte chars start 110xxxxx
+
+    if (i == end) {                         // Incomplete input
+      pending = b0 << 2;                    // 2 bytes seen so far, rest are pending
+      return true;
+    }
+
+    std::uint8_t b2 = *i++;
+    if ((b2 & 0xc0) != 0x80) return false;  // Following bytes are all 10xxxxxx
+    if ((b0 & 0xf0) == 0xe0) continue;      // Three-byte chars start 1110xxxx
+
+    if (i == end) {                         // Incomplete input
+      pending = b0 << 3;                    // 3 bytes seen so far, rest are pending
+      return true;
+    }
+
+    std::uint8_t b3 = *i++;
+    if ((b3 & 0xc0) != 0x80) return false;  // Following bytes are all 10xxxxxx
+    if ((b0 & 0xf8) == 0xf0) continue;      // Four-byte chars start 11110xxx
+
+    return false;                           // Not reached, I think.
+
+  }
+  return true;
+}
+
+#endif
 
 using utf8_checker = utf8_checker_t<>;
 
