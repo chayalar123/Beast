@@ -362,6 +362,25 @@ public:
 
     //--------------------------------------------------------------------------
 
+#if 0
+struct on_chunk_cb
+{
+    virtual ~on_chunk_cb() = default;
+    virtual void operator()(std::uint64_t, string_view, error_code&) = 0;
+};
+
+template<class OnChunkDataCallback>
+struct on_chunk_cb_impl : on_chunk_cb
+{
+    OnChunkDataCallback& cb_;
+
+    void
+    operator()(std::uint64_t, string_view, error_code&) override
+    {
+        cb_(...);
+    }
+};
+#endif
     void
     doExplicitChunkParse()
     {
@@ -388,14 +407,47 @@ public:
         flat_buffer b;
         response_parser<empty_body> p;
         read_header(c.client, b, p);
-        BOOST_ASSERT(p.is_chunked());
-        //while(! p.is_done())
-        {
-            // read the chunk header?
-            // read the next chunk?
+    
+#if 0
+        auto on_chunk_cb =
+            [&](std::uint64_t size, string_view extension, error_code& ec)
+            {
+                // Called after the chunk header is read in
+                // size is the size of the chunk body that follows
+                // extension is the raw chunk-extensions string
+                // ec may be set in this function to indicate an error
+                p.get().body.clear();
+                ec.assign(0, ec.category());
+            });
+        p.on_chunk(on_chunk_cb);
 
+        auto on_chunk_data_cb =            
+            [&](std::uint64_t remain, string_view body, error_code& ec)
+            {
+                // Called one or more times for the chunk body
+                // remain is the number of bytes left in the chunk.
+                //        if remain==0 this is the last part of the chunk.
+                // body is a buffer holding the next part of the chunk body
+                // ec may be set in this function to indicate an error
+                if(remain == 0)
+                    ec = error::end_of_chunk;
+            });
+        p.on_chunk_data(on_chunk_data_cb);
+            
+        while(! p.is_done())
+        {        
+            read(stream, b, p, ec);
+            if(! ec)
+                continue;
+            else if(ec != error::end_of_chunk)
+                return;
+            else
+            ec.assign(0, ec.category());
+            
+            // do something with the chunk
         }
-
+        // access trailers
+#endif
     }
 
     //--------------------------------------------------------------------------
